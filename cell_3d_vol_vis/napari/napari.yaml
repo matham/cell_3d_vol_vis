@@ -1,0 +1,9 @@
+name: cell-3d-vol-vis
+contributions:
+  commands:
+    - id: cell-3d-vol-vis.napari.widget.cell_3d_vol_widget
+      python_name: cell_3d_vol_vis.napari.widget:cell_3d_vol_widget
+      title: Extract sub-volume for 3d
+  widgets:
+    - command: cell-3d-vol-vis.napari.widget.cell_3d_vol_widget
+      display_name: Extract sub-volume for 3d
