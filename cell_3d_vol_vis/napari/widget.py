@@ -2,10 +2,12 @@
 
 from functools import partial
 from pathlib import Path
-
+from typing import Literal
 import napari
+import random
 import napari.layers
 import numpy as np
+import matplotlib.colors as mcolors
 from brainglobe_utils.cells.cells import Cell
 from cellfinder.core import types
 from magicgui import widgets
@@ -41,6 +43,8 @@ class VolumeVisWidget:
         self.run_widget: FunctionGui | None = None
         self.layers_widget: FunctionGui | None = None
         self.segmentation_layer_widget: FunctionGui | None = None
+
+        self._widgets_that_list_layers: list[widgets.ListEdit] = []
 
     def _process_image_layers(
         self,
@@ -134,12 +138,16 @@ class VolumeVisWidget:
         update_existing_layers: bool,
         scale_to_voxel: bool,
     ):
+        array_props = {"symbol", "face_color", "size", "border_width", "border_color"}
         for layer_cells, cell_layer in zip(cells, layers, strict=False):
             name = f"vol-{cell_layer.name}"
             mask = layer_cells["mask"]
 
             if update_existing_layers and name in self.viewer.layers:
                 new_layer = self.viewer.layers[name]
+                new_layer.selected_data = []
+                # there's weird graphics sometimes when re-using points layer
+                new_layer.data = []
                 new_layer.data = layer_cells["pos"][mask, :]
                 new_layer.features = layer_cells["features"].loc[mask, :]
             else:
@@ -155,11 +163,16 @@ class VolumeVisWidget:
                 for prop in (
                     "opacity",
                     "symbol",
+                    "current_symbol",
                     "face_color",
+                    "current_face_color",
                     "size",
+                    "current_size",
                     "text",
                     "border_width",
+                    "current_border_width",
                     "border_color",
+                    "current_border_color",
                     "border_colormap",
                     "border_contrast_limits",
                     "face_colormap",
@@ -170,13 +183,14 @@ class VolumeVisWidget:
                     "canvas_size_limits",
                 ):
                     prop_val = getattr(cell_layer, prop)
-                    if isinstance(prop_val, np.ndarray):
+                    if prop in array_props and len(prop_val):
                         setattr(new_layer, prop, prop_val[mask])
                     else:
                         setattr(new_layer, prop, prop_val)
 
             if scale_to_voxel:
                 new_layer.scale = voxel_size
+            new_layer.refresh()
 
     def process_worker_result(
         self,
@@ -189,8 +203,8 @@ class VolumeVisWidget:
         show_in_3d: bool,
         update_existing_layers: bool,
         scale_to_voxel: bool,
+        center: tuple[int, int, int],
     ):
-        step = list(self.viewer.dims.current_step)
         cuboid_offset, cells, images = result
 
         label_or_image = [
@@ -231,7 +245,8 @@ class VolumeVisWidget:
         if self.seg_layer is not None:
             self.seg_layer.visible = False
 
-        self.viewer.dims.current_step = step
+        self.viewer.dims.set_current_step(0, center[0])
+        self.viewer.camera.center = tuple(c * vx for c, vx in zip(center, voxel_size))
 
         if show_in_3d:
             self.view_3d()
@@ -241,16 +256,13 @@ class VolumeVisWidget:
         widget = self.run_widget
         viewer = self.viewer
 
-        do_scale = widget.scale_to_voxel.get_value()
         voxel_size = widget.voxel_size.get_value()
 
         center = (
-            int(viewer.dims.current_step[0]),
+            int(round(viewer.dims.current_step[0] * voxel_size[0])),
             int(viewer.camera.center[1]),
             int(viewer.camera.center[2]),
         )
-        if do_scale:
-            center = center[0] * voxel_size[0], *center[1:]
         zoom = viewer.camera.zoom
 
         viewer.dims.ndisplay = 2
@@ -262,16 +274,13 @@ class VolumeVisWidget:
         widget = self.run_widget
         viewer = self.viewer
 
-        do_scale = widget.scale_to_voxel.get_value()
         voxel_size = widget.voxel_size.get_value()
 
         center = (
-            int(viewer.dims.current_step[0]),
+            int(round(viewer.dims.current_step[0] * voxel_size[0])),
             int(viewer.camera.center[1]),
             int(viewer.camera.center[2]),
         )
-        if do_scale:
-            center = center[0] * voxel_size[0], *center[1:]
         zoom = viewer.camera.zoom
         orientation = viewer.camera.orientation
 
@@ -281,19 +290,35 @@ class VolumeVisWidget:
         viewer.camera.orientation = orientation
         viewer.camera.angles = 0, 0, 90
 
+    def apply_current_prop_to_existing_points(self):
+        self.layers_widget()
+
+        for layer in self.viewer.layers.selection:
+            if not isinstance(layer, Points):
+                continue
+
+            layer.face_color[:] = mcolors.to_rgba(layer.current_face_color)
+            layer.border_color[:] = mcolors.to_rgba(layer.current_border_color)
+            layer.size[:] = layer.current_size
+            layer.symbol[:] = layer.current_symbol
+            layer.border_width[:] = layer.current_border_width
+
+            layer.shading = "spherical"
+
+            layer.refresh()
+
     def set_layers_voxel_sizes(self):
         self.layers_widget()
-        self.segmentation_layer_widget()
+        layers = list(self.viewer.layers.selection)
 
         vox_size = self.run_widget.voxel_size.get_value()
         step = list(self.viewer.dims.current_step)
 
-        for layer in self.layers:
+        for layer in layers:
             layer.scale = vox_size
+        # refresh at end so we don't do it after every layer change
+        for layer in layers:
             layer.refresh()
-        if self.seg_layer is not None:
-            self.seg_layer.scale = vox_size
-            self.seg_layer.refresh()
 
         self.viewer.dims.current_step = step
 
@@ -334,9 +359,10 @@ class VolumeVisWidget:
         cuboid_size: tuple[float, float, float] = (100, 50, 50),
         region_cuboids_path: Path | None = None,
         selected_region_id: int = -1,
-        scale_to_voxel: bool = False,
         update_existing_layers: bool = False,
         show_in_3d: bool = False,
+        available_points: Points | None = None,
+        center_at: Literal["View Center", "Random Point", "Selected Point"] = "View Center",
     ) -> None:
         """
         Run analysis.
@@ -353,8 +379,41 @@ class VolumeVisWidget:
         layers = self.layers
         viewer: napari.Viewer = self.viewer
 
+        if center_at == "View Center":
+            center = (
+                int(viewer.dims.current_step[0]),
+                int(viewer.camera.center[1] / voxel_size[1]),
+                int(viewer.camera.center[2] / voxel_size[2]),
+            )
+        else:
+            if available_points is None:
+                raise ValueError(
+                    "Center points layer must be provided if centering the "
+                    "cuboid at a point"
+                )
+            n = len(available_points.data)
+            if not n:
+                raise ValueError("There must be some points in points layer")
+
+            if set(available_points.translate) != {0}:
+                raise ValueError("Layer translate must all be zero")
+
+            if center_at == "Random Point":
+                i = random.randrange(n)
+            else:
+                selection = list(available_points.selected_data)
+                if len(selection) != 1:
+                    raise ValueError(
+                        "Exactly one point must be selected in points layer"
+                    )
+                i = selection[0]
+            center = list(map(int, available_points.data[i]))
+
         cells = []
         for layer in layers:
+            if set(layer.translate) != {0}:
+                raise ValueError("Layer translate must all be zero")
+
             if not isinstance(layer, Points):
                 continue
 
@@ -368,23 +427,10 @@ class VolumeVisWidget:
                 mask = np.ones(len(data), dtype=np.bool)
             cells.append({"pos": data, "features": features, "mask": mask})
 
-        center = (
-            int(viewer.dims.current_step[0]),
-            int(viewer.camera.center[1]),
-            int(viewer.camera.center[2]),
-        )
-        if scale_to_voxel:
-            center = (
-                center[0],
-                int(center[1] / voxel_size[1]),
-                int(center[2] / voxel_size[2]),
-            )
-            cuboid_size_px = [
-                int(round(size / um_ppx))
-                for size, um_ppx in zip(cuboid_size, voxel_size, strict=False)
-            ]
-        else:
-            cuboid_size_px = list(map(int, cuboid_size))
+        cuboid_size_px = [
+            int(round(size / um_ppx))
+            for size, um_ppx in zip(cuboid_size, voxel_size, strict=False)
+        ]
 
         start = [0, 0, 0]
         for i, (c, size) in enumerate(
@@ -422,17 +468,22 @@ class VolumeVisWidget:
                 self.process_worker_result,
                 voxel_size=voxel_size,
                 show_in_3d=show_in_3d,
-                scale_to_voxel=scale_to_voxel,
+                scale_to_voxel=True,
                 update_existing_layers=update_existing_layers,
+                center=center,
             )
         )
 
         worker.start()
 
+    def _update_layer_widgets_new_layers(self, *args):
+        for widget in self._widgets_that_list_layers:
+            widget.reset_choices()
+
     def build(self) -> widgets.Container:
         self.run_widget = FunctionGui(
             self.run,
-            call_button=True,
+            call_button="Run extract",
             persist=True,
             param_options={
                 "cuboid_size": {"options": {"min": 0, "max": 10000}},
@@ -478,22 +529,40 @@ class VolumeVisWidget:
             widgets=[
                 run_widget,
                 FunctionGui(
+                    self.view_2d, call_button="Show 2D view", auto_call=False
+                ),
+                FunctionGui(
+                    self.view_3d, call_button="Show 3D view", auto_call=False
+                ),
+                FunctionGui(
                     self.set_layers_voxel_sizes,
-                    call_button="Set layers voxel size",
+                    call_button="Selected layers' voxel size",
                     auto_call=False,
                 ),
                 FunctionGui(
-                    self.view_2d, call_button="Show in 2D", auto_call=False
-                ),
-                FunctionGui(
-                    self.view_3d, call_button="Show in 3D", auto_call=False
+                    self.apply_current_prop_to_existing_points,
+                    call_button="Selected P layers from current",
+                    auto_call=False,
                 ),
             ],
             layout="vertical",
             labels=False,
+            scrollable=True,
         )
 
-        return container
+        self._widgets_that_list_layers = [
+            self.layers_widget.layers,
+            self.segmentation_layer_widget.seg_layer,
+            self.run_widget.available_points,
+        ]
+
+        viewer = napari.current_viewer()
+        viewer.layers.events.inserted.connect(self._update_layer_widgets_new_layers)
+        viewer.layers.events.removed.connect(self._update_layer_widgets_new_layers)
+        viewer.layers.events.renamed.connect(self._update_layer_widgets_new_layers)
+
+        # needed for enabling scrolling
+        return container.root_native_widget
 
 
 def reraise(e: Exception) -> None:
