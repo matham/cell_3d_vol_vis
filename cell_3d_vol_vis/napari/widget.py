@@ -1,13 +1,14 @@
 """ """
 
+import random
 from functools import partial
 from pathlib import Path
 from typing import Literal
+
+import matplotlib.colors as mcolors
 import napari
-import random
 import napari.layers
 import numpy as np
-import matplotlib.colors as mcolors
 from brainglobe_utils.cells.cells import Cell
 from cellfinder.core import types
 from magicgui import widgets
@@ -138,7 +139,13 @@ class VolumeVisWidget:
         update_existing_layers: bool,
         scale_to_voxel: bool,
     ):
-        array_props = {"symbol", "face_color", "size", "border_width", "border_color"}
+        array_props = {
+            "symbol",
+            "face_color",
+            "size",
+            "border_width",
+            "border_color",
+        }
         for layer_cells, cell_layer in zip(cells, layers, strict=False):
             name = f"vol-{cell_layer.name}"
             mask = layer_cells["mask"]
@@ -246,7 +253,9 @@ class VolumeVisWidget:
             self.seg_layer.visible = False
 
         self.viewer.dims.set_current_step(0, center[0])
-        self.viewer.camera.center = tuple(c * vx for c, vx in zip(center, voxel_size))
+        self.viewer.camera.center = tuple(
+            c * vx for c, vx in zip(center, voxel_size, strict=False)
+        )
 
         if show_in_3d:
             self.view_3d()
@@ -362,7 +371,10 @@ class VolumeVisWidget:
         update_existing_layers: bool = False,
         show_in_3d: bool = False,
         available_points: Points | None = None,
-        center_at: Literal["View Center", "Random Point", "Selected Point"] = "View Center",
+        current_point: int = 0,
+        center_at: Literal[
+            "View Center", "Random Point", "Selected Point", "Next Point"
+        ] = "View Center",
     ) -> None:
         """
         Run analysis.
@@ -400,6 +412,18 @@ class VolumeVisWidget:
 
             if center_at == "Random Point":
                 i = random.randrange(n)
+            elif center_at == "Next Point":
+                if not (0 <= current_point < n):
+                    raise ValueError(
+                        f"Current point out of range "
+                        f"({current_point} / [0, {n - 1}])"
+                    )
+                i = current_point
+
+                current_point += 1
+                if current_point == n:
+                    current_point = 0
+                self.run_widget.current_point.value = current_point
             else:
                 selection = list(available_points.selected_data)
                 if len(selection) != 1:
@@ -480,6 +504,9 @@ class VolumeVisWidget:
         for widget in self._widgets_that_list_layers:
             widget.reset_choices()
 
+    def _update_current_point_from_layer_change(self, *args):
+        self.run_widget.current_point.value = 0
+
     def build(self) -> widgets.Container:
         self.run_widget = FunctionGui(
             self.run,
@@ -489,6 +516,9 @@ class VolumeVisWidget:
                 "cuboid_size": {"options": {"min": 0, "max": 10000}},
                 "selected_region_id": {"min": -1, "max": 100_000},
             },
+        )
+        self.run_widget.available_points.changed.connect(
+            self._update_current_point_from_layer_change
         )
         self.layers_widget = FunctionGui(
             self.layers_run,
@@ -536,12 +566,12 @@ class VolumeVisWidget:
                 ),
                 FunctionGui(
                     self.set_layers_voxel_sizes,
-                    call_button="Selected layers' voxel size",
+                    call_button="Set sel. layers' voxel size",
                     auto_call=False,
                 ),
                 FunctionGui(
                     self.apply_current_prop_to_existing_points,
-                    call_button="Selected P layers from current",
+                    call_button="Set sel. P layers from current",
                     auto_call=False,
                 ),
             ],
@@ -557,9 +587,15 @@ class VolumeVisWidget:
         ]
 
         viewer = napari.current_viewer()
-        viewer.layers.events.inserted.connect(self._update_layer_widgets_new_layers)
-        viewer.layers.events.removed.connect(self._update_layer_widgets_new_layers)
-        viewer.layers.events.renamed.connect(self._update_layer_widgets_new_layers)
+        viewer.layers.events.inserted.connect(
+            self._update_layer_widgets_new_layers
+        )
+        viewer.layers.events.removed.connect(
+            self._update_layer_widgets_new_layers
+        )
+        viewer.layers.events.renamed.connect(
+            self._update_layer_widgets_new_layers
+        )
 
         # needed for enabling scrolling
         return container.root_native_widget
