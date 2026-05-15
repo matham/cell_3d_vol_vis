@@ -445,10 +445,10 @@ class VolumeVisWidget:
             features = features_to_pandas_dataframe(layer.features)
 
             if selected_cells_only:
-                mask = np.zeros(len(data), dtype=np.bool)
+                mask = np.zeros(len(data), dtype=np.bool_)
                 mask[np.asarray(list(layer.selected_data))] = True
             else:
-                mask = np.ones(len(data), dtype=np.bool)
+                mask = np.ones(len(data), dtype=np.bool_)
             cells.append({"pos": data, "features": features, "mask": mask})
 
         cuboid_size_px = [
